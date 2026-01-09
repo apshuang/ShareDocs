@@ -5,9 +5,12 @@ from typing import Optional
 import os
 from app.database import get_db
 from app.models.document import Document
+from app.models.document_operation import DocumentOperation
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse, DocumentListResponse
+from app.schemas.operation import OperationRequest
 from app.utils.jwt import get_current_user
+from app.utils.operation import apply_operation
 from app.config import settings
 
 router = APIRouter(prefix="/api/documents", tags=["文档"])
@@ -211,6 +214,72 @@ async def delete_document(
     return {
         "success": True,
         "message": "文档删除成功"
+    }
+
+
+@router.post("/{document_id}/operations", response_model=dict)
+async def apply_document_operation(
+    document_id: int,
+    operation: OperationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.owner_id == current_user.id
+    ).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在"
+        )
+    
+    # 这里先使用一种很暴力的办法来判断（当前还是只支持单用户编辑的，在支持多用户时，这里就有相应的冲突解决措施）
+    if operation.base_version != document.current_version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"版本冲突：操作基于版本 {operation.base_version}，但当前版本是 {document.current_version}"
+        )
+    
+    content = read_document_content(document.id)
+    
+    try:
+        operation_dict = operation.model_dump()
+        new_content = apply_operation(content, operation_dict)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"操作应用失败: {str(e)}"
+        )
+    
+    version_before = document.current_version
+    version_after = version_before + 1
+    
+    write_document_content(document.id, new_content)
+    
+    document.current_version = version_after
+    db.commit()
+    
+    operation_record = DocumentOperation(
+        document_id=document.id,
+        user_id=current_user.id,
+        operation_type=operation.type,
+        operation_data=operation.model_dump(),
+        sequence_number=version_after,
+        version_before=version_before,
+        version_after=version_after
+    )
+    db.add(operation_record)
+    db.commit()
+    
+    return {
+        "success": True,
+        "data": {
+            "version": version_after,
+            "operation": operation.model_dump()
+        },
+        "message": "操作应用成功"
     }
 
 

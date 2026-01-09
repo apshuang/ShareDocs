@@ -71,6 +71,16 @@ export const documentAPI = {
   
   delete: (id: number) =>
     apiClient.delete(`/api/documents/${id}`),
+  
+  applyOperation: (id: number, operation: {
+    type: 'insert' | 'delete' | 'format' | 'replace'
+    from_pos: number
+    to_pos: number
+    content?: string
+    marks?: Record<string, any>
+    base_version: number
+  }) =>
+    apiClient.post(`/api/documents/${id}/operations`, operation),
 }
 
 export default apiClient

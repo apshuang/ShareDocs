@@ -208,3 +208,6 @@ __marimo__/
 
 # Project private data
 developping_docs
+
+# documents data
+backend/data/documents

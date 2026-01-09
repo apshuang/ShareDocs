@@ -20,15 +20,24 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useEditor, EditorContent } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { useDocumentStore } from '@/stores/document'
+import { documentAPI } from '@/services/api'
+import { htmlToMarkdown } from '@/utils/markdown'
 
 const route = useRoute()
 const router = useRouter()
 const documentStore = useDocumentStore()
+
+const documentId = ref<number | null>(null)
+const lastMarkdown = ref<string>('')
+const currentVersion = ref<number>(0)
+const isApplyingOperation = ref(false)
+const isSendingOperation = ref(false)
+let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const editor = useEditor({
   extensions: [StarterKit],
@@ -38,16 +47,142 @@ const editor = useEditor({
       class: 'prose prose-sm sm:prose lg:prose-lg xl:prose-2xl mx-auto focus:outline-none',
     },
   },
+  onUpdate: ({ editor }) => {
+    if (isApplyingOperation.value) {
+      return
+    }
+    
+    if (!documentId.value) {
+      return
+    }
+    
+    if (debounceTimer) {
+      clearTimeout(debounceTimer)
+    }
+    
+    debounceTimer = setTimeout(() => {
+      const html = editor.getHTML()
+      const newMarkdown = htmlToMarkdown(html)
+      
+      if (newMarkdown === lastMarkdown.value) {
+        return
+      }
+      
+      handleContentChange(lastMarkdown.value, newMarkdown)
+      lastMarkdown.value = newMarkdown
+    }, 300)
+  },
 })
 
+function calculateDiff(oldText: string, newText: string): Array<{ type: 'insert' | 'delete' | 'replace', from_pos: number, to_pos: number, content?: string }> {
+  const operations: Array<{ type: 'insert' | 'delete' | 'replace', from_pos: number, to_pos: number, content?: string }> = []
+  
+  let i = 0
+  while (i < oldText.length && i < newText.length && oldText[i] === newText[i]) {
+    i++
+  }
+  
+  let oldEnd = oldText.length
+  let newEnd = newText.length
+  while (oldEnd > i && newEnd > i && oldText[oldEnd - 1] === newText[newEnd - 1]) {
+    oldEnd--
+    newEnd--
+  }
+  
+  if (i === oldEnd && i === newEnd) {
+    return []
+  }
+  
+  const deleted = oldText.substring(i, oldEnd)
+  const inserted = newText.substring(i, newEnd)
+  
+  if (deleted.length > 0 && inserted.length > 0) {
+    operations.push({
+      type: 'replace',
+      from_pos: i,
+      to_pos: oldEnd,
+      content: inserted
+    })
+  } else if (deleted.length > 0) {
+    operations.push({
+      type: 'delete',
+      from_pos: i,
+      to_pos: oldEnd
+    })
+  } else if (inserted.length > 0) {
+    operations.push({
+      type: 'insert',
+      from_pos: i,
+      to_pos: i,
+      content: inserted
+    })
+  }
+  
+  return operations
+}
+
+async function handleContentChange(oldMarkdown: string, newMarkdown: string) {
+  if (!documentId.value || isSendingOperation.value) {
+    return
+  }
+  
+  const operations = calculateDiff(oldMarkdown, newMarkdown)
+  if (operations.length === 0) {
+    return
+  }
+  
+  isSendingOperation.value = true
+  
+  try {
+    for (const op of operations) {
+      const operationData: any = {
+        type: op.type === 'replace' ? 'replace' : op.type,
+        from_pos: op.from_pos,
+        to_pos: op.to_pos,
+        base_version: currentVersion.value
+      }
+      
+      if (op.type === 'insert' || op.type === 'replace') {
+        operationData.content = op.content
+      }
+      
+      const response = await documentAPI.applyOperation(documentId.value, operationData)
+      
+      if (response.data.success) {
+        currentVersion.value = response.data.data.version
+      } else {
+        console.error('操作应用失败:', response.data.message)
+        alert('操作应用失败: ' + response.data.message)
+        break
+      }
+    }
+  } catch (error: any) {
+    console.error('发送操作失败:', error)
+    if (error.response?.status === 409) {
+      alert('版本冲突，请刷新页面')
+      location.reload()
+    } else {
+      alert('发送操作失败: ' + (error.response?.data?.detail || error.message))
+    }
+  } finally {
+    isSendingOperation.value = false
+  }
+}
+
 onMounted(async () => {
-  const documentId = parseInt(route.params.id as string)
-  const result = await documentStore.fetchDocument(documentId)
+  const id = parseInt(route.params.id as string)
+  documentId.value = id
+  
+  const result = await documentStore.fetchDocument(id)
   
   if (result.success && documentStore.currentDocument) {
-    // 加载文档内容到编辑器
     if (editor.value && documentStore.currentDocument.content) {
+      isApplyingOperation.value = true
       editor.value.commands.setContent(documentStore.currentDocument.content)
+      const html = editor.value.getHTML()
+      lastMarkdown.value = htmlToMarkdown(html)
+      currentVersion.value = documentStore.currentDocument.current_version
+      isApplyingOperation.value = false
     }
   } else {
     alert(result.message || '加载文档失败')
@@ -56,6 +191,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  if (debounceTimer) {
+    clearTimeout(debounceTimer)
+  }
   if (editor.value) {
     editor.value.destroy()
   }
