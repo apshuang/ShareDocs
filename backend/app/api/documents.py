@@ -217,6 +217,60 @@ async def delete_document(
     }
 
 
+@router.get("/{document_id}/editors", response_model=dict)
+async def get_document_editors(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.owner_id == current_user.id
+    ).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在"
+        )
+    
+    editors_query = db.query(
+        DocumentOperation.user_id,
+        User.username,
+        User.color,
+        func.max(DocumentOperation.timestamp).label('last_edit_time')
+    ).join(
+        User, DocumentOperation.user_id == User.id
+    ).filter(
+        DocumentOperation.document_id == document_id
+    ).group_by(
+        DocumentOperation.user_id, User.username, User.color
+    ).order_by(
+        func.max(DocumentOperation.timestamp).desc()
+    )
+    
+    editors = editors_query.all()
+    
+    editors_list = [
+        {
+            "user_id": editor.user_id,
+            "username": editor.username,
+            "color": editor.color or '#FFA07A',
+            "last_edit_time": editor.last_edit_time.isoformat() if editor.last_edit_time else None
+        }
+        for editor in editors
+    ]
+    
+    return {
+        "success": True,
+        "data": {
+            "editors": editors_list,
+            "last_updated": document.updated_at.isoformat()
+        },
+        "message": "获取成功"
+    }
+
+
 @router.post("/{document_id}/operations", response_model=dict)
 async def apply_document_operation(
     document_id: int,

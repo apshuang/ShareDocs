@@ -15,7 +15,7 @@ const showNavbar = computed(() => {
     <main :class="{ 'full-screen': !showNavbar }">
       <RouterView />
     </main>
-  </div>
+    </div>
 </template>
 
 <style>
@@ -43,7 +43,7 @@ main {
   margin: 0;
   padding: 0;
   min-height: 100vh;
-}
+  }
 
 main.full-screen {
   min-height: 100vh;

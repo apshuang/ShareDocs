@@ -8,8 +8,36 @@
     
     <div v-else class="editor-wrapper">
       <div class="editor-header">
-        <h1>{{ documentStore.currentDocument.title }}</h1>
+        <div class="header-left">
+          <input
+            v-model="documentTitle"
+            @blur="saveTitle"
+            @keyup.enter="saveTitle"
+            class="title-input"
+            type="text"
+          />
+        </div>
         <button @click="goBack" class="back-button">返回</button>
+      </div>
+      
+      <div class="editor-meta" v-if="editors.length > 0 || lastUpdated">
+        <div class="editors-list" v-if="editors.length > 0">
+          <div
+            v-for="editor in editors"
+            :key="editor.user_id"
+            class="editor-item"
+          >
+            <span
+              class="color-dot"
+              :style="{ backgroundColor: editor.color || '#FFA07A' }"
+            ></span>
+            <span class="editor-name">{{ truncateUsername(editor.username) }}</span>
+          </div>
+        </div>
+        <div class="meta-divider" v-if="editors.length > 0 && lastUpdated">|</div>
+        <div class="last-updated" v-if="lastUpdated">
+          {{ formatDate(lastUpdated) }}
+        </div>
       </div>
       
       <div class="editor-container">
@@ -26,7 +54,7 @@ import { useEditor, EditorContent } from '@tiptap/vue-3'
 import StarterKit from '@tiptap/starter-kit'
 import { useDocumentStore } from '@/stores/document'
 import { documentAPI } from '@/services/api'
-import { htmlToMarkdown } from '@/utils/markdown'
+import { htmlToMarkdown, markdownToHtml } from '@/utils/markdown'
 
 const route = useRoute()
 const router = useRouter()
@@ -37,6 +65,9 @@ const lastMarkdown = ref<string>('')
 const currentVersion = ref<number>(0)
 const isApplyingOperation = ref(false)
 const isSendingOperation = ref(false)
+const documentTitle = ref<string>('')
+const editors = ref<Array<{ user_id: number; username: string; color: string; last_edit_time: string | null }>>([])
+const lastUpdated = ref<string>('')
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const editor = useEditor({
@@ -155,6 +186,8 @@ async function handleContentChange(oldMarkdown: string, newMarkdown: string) {
         alert('操作应用失败: ' + response.data.message)
         break
       }
+    
+    await loadEditors()
     }
   } catch (error: any) {
     console.error('发送操作失败:', error)
@@ -176,14 +209,17 @@ onMounted(async () => {
   const result = await documentStore.fetchDocument(id)
   
   if (result.success && documentStore.currentDocument) {
+    documentTitle.value = documentStore.currentDocument.title
     if (editor.value && documentStore.currentDocument.content) {
       isApplyingOperation.value = true
-      editor.value.commands.setContent(documentStore.currentDocument.content)
-      const html = editor.value.getHTML()
-      lastMarkdown.value = htmlToMarkdown(html)
+      const markdown = documentStore.currentDocument.content
+      const html = markdownToHtml(markdown)
+      editor.value.commands.setContent(html)
+      lastMarkdown.value = markdown
       currentVersion.value = documentStore.currentDocument.current_version
       isApplyingOperation.value = false
     }
+    await loadEditors()
   } else {
     alert(result.message || '加载文档失败')
     router.push('/documents')
@@ -199,6 +235,96 @@ onBeforeUnmount(() => {
   }
   documentStore.clearCurrentDocument()
 })
+
+async function saveTitle() {
+  if (!documentId.value || !documentStore.currentDocument) {
+    return
+  }
+  
+  const newTitle = documentTitle.value.trim()
+  if (newTitle === documentStore.currentDocument.title || !newTitle) {
+    documentTitle.value = documentStore.currentDocument.title
+    return
+  }
+  
+  try {
+    const result = await documentStore.updateDocument(documentId.value, newTitle)
+    if (result.success) {
+      if (documentStore.currentDocument) {
+        documentStore.currentDocument.title = newTitle
+      }
+      await loadEditors()
+    } else {
+      alert('保存标题失败: ' + result.message)
+      if (documentStore.currentDocument) {
+        documentTitle.value = documentStore.currentDocument.title
+      }
+    }
+  } catch (error: any) {
+    console.error('保存标题失败:', error)
+    alert('保存标题失败: ' + (error.response?.data?.detail || error.message))
+    if (documentStore.currentDocument) {
+      documentTitle.value = documentStore.currentDocument.title
+    }
+  }
+}
+
+async function loadEditors() {
+  if (!documentId.value) {
+    return
+  }
+  
+  try {
+    const response = await documentAPI.getEditors(documentId.value)
+    if (response.data.success) {
+      editors.value = response.data.data.editors
+      lastUpdated.value = response.data.data.last_updated
+    }
+  } catch (error: any) {
+    console.error('加载编辑者信息失败:', error)
+  }
+}
+
+function formatDate(dateString: string): string {
+  if (!dateString) {
+    return '未知'
+  }
+  const date = new Date(dateString)
+  const now = new Date()
+  const diff = now.getTime() - date.getTime()
+  const seconds = Math.floor(diff / 1000)
+  const minutes = Math.floor(seconds / 60)
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  const months = Math.floor(days / 30)
+  const years = Math.floor(days / 365)
+  
+  if (years > 0) {
+    return `${years}年前`
+  } else if (months > 0) {
+    return `${months}个月前`
+  } else if (days > 0) {
+    return `${days}天前`
+  } else if (hours > 0) {
+    return `${hours}小时前`
+  } else if (minutes > 0) {
+    return `${minutes}分钟前`
+  } else if (seconds > 10) {
+    return `${seconds}秒前`
+  } else {
+    return '刚刚'
+  }
+}
+
+function truncateUsername(username: string, maxLength: number = 8): string {
+  if (!username) {
+    return ''
+  }
+  if (username.length <= maxLength) {
+    return username
+  }
+  return username.substring(0, maxLength) + '....'
+}
 
 function goBack() {
   router.push('/documents')
@@ -239,9 +365,26 @@ function goBack() {
   border-bottom: 1px solid #eee;
 }
 
-.editor-header h1 {
-  margin: 0;
+.header-left {
+  flex: 1;
+}
+
+.title-input {
+  width: 100%;
+  font-size: 2rem;
+  font-weight: bold;
   color: #333;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 0.5rem 0;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.title-input:focus {
+  border-bottom: 2px solid #667eea;
+  padding-bottom: 0.25rem;
 }
 
 .back-button {
@@ -251,6 +394,58 @@ function goBack() {
   padding: 0.5rem 1rem;
   border-radius: 4px;
   cursor: pointer;
+  transition: background 0.2s;
+}
+
+.back-button:hover {
+  background: #5568d3;
+}
+
+.editor-meta {
+  display: flex;
+  align-items: center;
+  padding: 0.75rem 1.5rem;
+  background: #f9f9f9;
+  border-bottom: 1px solid #eee;
+  font-size: 1rem;
+  color: #666;
+  gap: 0.75rem;
+}
+
+.editors-list {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.editor-item {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.color-dot {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.editor-name {
+  font-size: 1rem;
+  color: #666;
+}
+
+.meta-divider {
+  color: #ccc;
+  margin: 0 0.25rem;
+}
+
+.last-updated {
+  color: #666;
+  font-size: 1rem;
 }
 
 .editor-container {

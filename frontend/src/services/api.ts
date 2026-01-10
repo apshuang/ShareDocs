@@ -81,6 +81,9 @@ export const documentAPI = {
     base_version: number
   }) =>
     apiClient.post(`/api/documents/${id}/operations`, operation),
+  
+  getEditors: (id: number) =>
+    apiClient.get(`/api/documents/${id}/editors`),
 }
 
 export default apiClient
