@@ -7,8 +7,10 @@ interface Document {
   id: number
   title: string
   owner_id: number
+  is_owner?: boolean
   content?: string
   current_version: number
+  permission?: 'read' | 'edit' | 'admin'
   created_at: string
   updated_at: string
 }

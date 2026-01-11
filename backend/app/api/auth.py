@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from typing import Optional
 from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import UserRegister, UserLogin, TokenResponse, UserResponse
@@ -118,6 +119,43 @@ async def get_me(current_user: User = Depends(get_current_user)):
             "username": current_user.username,
             "email": current_user.email,
             "created_at": current_user.created_at.isoformat()
+        },
+        "message": "获取成功"
+    }
+
+
+@router.get("/users", response_model=dict)
+async def search_users(
+    q: Optional[str] = Query(None, description="搜索关键词（用户名或ID）"),
+    limit: int = Query(10, ge=1, le=50, description="返回数量"),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    query = db.query(User)
+    
+    if q:
+        try:
+            user_id = int(q)
+            query = query.filter(User.id == user_id)
+        except ValueError:
+            query = query.filter(User.username.ilike(f"%{q}%"))
+    
+    users = query.limit(limit).all()
+    
+    users_list = [
+        {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email
+        }
+        for user in users
+        if user.id != current_user.id
+    ]
+    
+    return {
+        "success": True,
+        "data": {
+            "users": users_list
         },
         "message": "获取成功"
     }

@@ -27,13 +27,22 @@
         class="document-card"
         @click="openDocument(doc.id)"
       >
-        <h3>{{ doc.title }}</h3>
+        <h3>
+          {{ doc.title }}
+          <span 
+            v-if="doc.permission && !doc.is_owner" 
+            :class="['permission-badge', `permission-${doc.permission}`]"
+          >
+            {{ getPermissionText(doc.permission) }}
+          </span>
+        </h3>
         <div class="document-meta">
           <span>版本: {{ doc.current_version }}</span>
           <span>{{ formatDate(doc.updated_at) }}</span>
         </div>
         <div class="document-actions">
           <button
+            v-if="doc.is_owner"
             @click.stop="handleDelete(doc.id)"
             class="delete-button"
           >
@@ -141,6 +150,15 @@ function formatDate(dateString: string) {
   const date = new Date(dateString)
   return date.toLocaleString('zh-CN')
 }
+
+function getPermissionText(permission: string): string {
+  const map: Record<string, string> = {
+    'read': '只读',
+    'edit': '编辑',
+    'admin': '管理员'
+  }
+  return map[permission] || permission
+}
 </script>
 
 <style scoped>
@@ -228,6 +246,29 @@ h1 {
 .document-card h3 {
   margin: 0 0 1rem 0;
   color: #333;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.permission-badge {
+  font-size: 0.75rem;
+  color: white;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-weight: normal;
+}
+
+.permission-badge.permission-read {
+  background: #95A5A6;
+}
+
+.permission-badge.permission-edit {
+  background: #3498DB;
+}
+
+.permission-badge.permission-admin {
+  background: #E67E22;
 }
 
 .document-meta {

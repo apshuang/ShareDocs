@@ -6,7 +6,7 @@ const COLORS = [
 ]
 
 export function getUserColor(userId: number): string {
-  return COLORS[userId % COLORS.length]
+  return COLORS[userId % COLORS.length] || '#FFA07A'
 }
 
 export function truncateUserId(userId: number, length: number = 8): string {

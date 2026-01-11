@@ -6,11 +6,15 @@ import os
 from app.database import get_db
 from app.models.document import Document
 from app.models.document_operation import DocumentOperation
+from app.models.document_share import DocumentShare, PermissionType
 from app.models.user import User
 from app.schemas.document import DocumentCreate, DocumentUpdate, DocumentResponse, DocumentListResponse
 from app.schemas.operation import OperationRequest
+from app.schemas.share import DocumentShareCreate, DocumentShareResponse
 from app.utils.jwt import get_current_user
 from app.utils.operation import apply_operation
+from app.utils.permission import has_document_access, get_user_documents_query, get_user_permission
+from app.websocket.manager import manager
 from app.config import settings
 
 router = APIRouter(prefix="/api/documents", tags=["文档"])
@@ -83,7 +87,7 @@ async def get_documents(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    query = db.query(Document).filter(Document.owner_id == current_user.id)
+    query = get_user_documents_query(db, current_user.id)
     
     if search:
         query = query.filter(Document.title.ilike(f"%{search}%"))
@@ -95,20 +99,24 @@ async def get_documents(
     
     total_pages = (total + page_size - 1) // page_size
     
+    items = []
+    for doc in documents:
+        permission = get_user_permission(db, doc.id, current_user.id)
+        items.append({
+            "id": doc.id,
+            "title": doc.title,
+            "owner_id": doc.owner_id,
+            "is_owner": doc.owner_id == current_user.id,
+            "permission": permission.value,
+            "current_version": doc.current_version,
+            "created_at": doc.created_at.isoformat(),
+            "updated_at": doc.updated_at.isoformat()
+        })
+    
     return {
         "success": True,
         "data": {
-            "items": [
-                {
-                    "id": doc.id,
-                    "title": doc.title,
-                    "owner_id": doc.owner_id,
-                    "current_version": doc.current_version,
-                    "created_at": doc.created_at.isoformat(),
-                    "updated_at": doc.updated_at.isoformat()
-                }
-                for doc in documents
-            ],
+            "items": items,
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -124,10 +132,13 @@ async def get_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.owner_id == current_user.id
-    ).first()
+    if not has_document_access(db, document_id, current_user.id, PermissionType.READ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在或无权访问"
+        )
+    
+    document = db.query(Document).filter(Document.id == document_id).first()
     
     if not document:
         raise HTTPException(
@@ -136,6 +147,7 @@ async def get_document(
         )
     
     content = read_document_content(document.id)
+    user_permission = get_user_permission(db, document_id, current_user.id)
     
     return {
         "success": True,
@@ -145,6 +157,7 @@ async def get_document(
             "owner_id": document.owner_id,
             "content": content,
             "current_version": document.current_version,
+            "permission": user_permission.value,
             "created_at": document.created_at.isoformat(),
             "updated_at": document.updated_at.isoformat()
         },
@@ -159,15 +172,18 @@ async def update_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.owner_id == current_user.id
-    ).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文档不存在"
+        )
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有文档所有者可以修改标题"
         )
     
     if document_data.title is not None:
@@ -193,15 +209,18 @@ async def delete_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.owner_id == current_user.id
-    ).first()
+    document = db.query(Document).filter(Document.id == document_id).first()
     
     if not document:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="文档不存在"
+        )
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有文档所有者可以删除文档"
         )
     
     file_path = get_document_file_path(document.id)
@@ -223,10 +242,13 @@ async def get_document_editors(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.owner_id == current_user.id
-    ).first()
+    if not has_document_access(db, document_id, current_user.id, PermissionType.READ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在或无权访问"
+        )
+    
+    document = db.query(Document).filter(Document.id == document_id).first()
     
     if not document:
         raise HTTPException(
@@ -278,10 +300,13 @@ async def apply_document_operation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    document = db.query(Document).filter(
-        Document.id == document_id,
-        Document.owner_id == current_user.id
-    ).first()
+    if not has_document_access(db, document_id, current_user.id, PermissionType.EDIT):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="无权编辑此文档"
+        )
+    
+    document = db.query(Document).filter(Document.id == document_id).first()
     
     if not document:
         raise HTTPException(
@@ -327,6 +352,22 @@ async def apply_document_operation(
     db.add(operation_record)
     db.commit()
     
+    operation_data = operation.model_dump()
+    operation_data["version"] = version_after
+    
+    await manager.broadcast_to_document(
+        {
+            "type": "operation_applied",
+            "data": {
+                "document_id": document_id,
+                "operation": operation_data,
+                "version": version_after
+            }
+        },
+        document_id,
+        exclude_user_id=current_user.id
+    )
+    
     return {
         "success": True,
         "data": {
@@ -334,6 +375,183 @@ async def apply_document_operation(
             "operation": operation.model_dump()
         },
         "message": "操作应用成功"
+    }
+
+
+@router.post("/{document_id}/shares", response_model=dict)
+async def share_document(
+    document_id: int,
+    share_data: DocumentShareCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在"
+        )
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有文档所有者可以分享文档"
+        )
+    
+    if share_data.user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="不能分享给自己"
+        )
+    
+    target_user = db.query(User).filter(User.id == share_data.user_id).first()
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="目标用户不存在"
+        )
+    
+    existing_share = db.query(DocumentShare).filter(
+        DocumentShare.document_id == document_id,
+        DocumentShare.user_id == share_data.user_id
+    ).first()
+    
+    if existing_share:
+        existing_share.permission = share_data.permission
+        existing_share.shared_by = current_user.id
+        db.commit()
+        db.refresh(existing_share)
+        
+        return {
+            "success": True,
+            "data": {
+                "id": existing_share.id,
+                "document_id": existing_share.document_id,
+                "user_id": existing_share.user_id,
+                "username": target_user.username,
+                "permission": existing_share.permission.value,
+                "shared_by": existing_share.shared_by,
+                "created_at": existing_share.created_at.isoformat(),
+                "updated_at": existing_share.updated_at.isoformat()
+            },
+            "message": "分享权限已更新"
+        }
+    
+    new_share = DocumentShare(
+        document_id=document_id,
+        user_id=share_data.user_id,
+        permission=share_data.permission,
+        shared_by=current_user.id
+    )
+    
+    db.add(new_share)
+    db.commit()
+    db.refresh(new_share)
+    
+    return {
+        "success": True,
+        "data": {
+            "id": new_share.id,
+            "document_id": new_share.document_id,
+            "user_id": new_share.user_id,
+            "username": target_user.username,
+            "permission": new_share.permission.value,
+            "shared_by": new_share.shared_by,
+            "created_at": new_share.created_at.isoformat(),
+            "updated_at": new_share.updated_at.isoformat()
+        },
+        "message": "文档分享成功"
+    }
+
+
+@router.get("/{document_id}/shares", response_model=dict)
+async def get_document_shares(
+    document_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在"
+        )
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有文档所有者可以查看分享列表"
+        )
+    
+    shares = db.query(DocumentShare, User).join(
+        User, DocumentShare.user_id == User.id
+    ).filter(
+        DocumentShare.document_id == document_id
+    ).all()
+    
+    shares_list = [
+        {
+            "id": share.id,
+            "document_id": share.document_id,
+            "user_id": share.user_id,
+            "username": user.username,
+            "permission": share.permission.value,
+            "shared_by": share.shared_by,
+            "created_at": share.created_at.isoformat(),
+            "updated_at": share.updated_at.isoformat()
+        }
+        for share, user in shares
+    ]
+    
+    return {
+        "success": True,
+        "data": {
+            "shares": shares_list
+        },
+        "message": "获取成功"
+    }
+
+
+@router.delete("/{document_id}/shares/{share_id}", response_model=dict)
+async def unshare_document(
+    document_id: int,
+    share_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    document = db.query(Document).filter(Document.id == document_id).first()
+    
+    if not document:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="文档不存在"
+        )
+    
+    if document.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有文档所有者可以取消分享"
+        )
+    
+    share = db.query(DocumentShare).filter(
+        DocumentShare.id == share_id,
+        DocumentShare.document_id == document_id
+    ).first()
+    
+    if not share:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="分享记录不存在"
+        )
+    
+    db.delete(share)
+    db.commit()
+    
+    return {
+        "success": True,
+        "message": "取消分享成功"
     }
 
 

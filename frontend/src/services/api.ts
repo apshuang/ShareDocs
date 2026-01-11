@@ -53,6 +53,9 @@ export const authAPI = {
   
   getMe: () =>
     apiClient.get('/api/auth/me'),
+  
+  searchUsers: (params?: { q?: string; limit?: number }) =>
+    apiClient.get('/api/auth/users', { params }),
 }
 
 // 文档 API
@@ -84,6 +87,15 @@ export const documentAPI = {
   
   getEditors: (id: number) =>
     apiClient.get(`/api/documents/${id}/editors`),
+  
+  shareDocument: (id: number, data: { user_id: number; permission: 'read' | 'edit' | 'admin' }) =>
+    apiClient.post(`/api/documents/${id}/shares`, data),
+  
+  getShares: (id: number) =>
+    apiClient.get(`/api/documents/${id}/shares`),
+  
+  unshareDocument: (id: number, shareId: number) =>
+    apiClient.delete(`/api/documents/${id}/shares/${shareId}`),
 }
 
 export default apiClient
