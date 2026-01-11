@@ -38,7 +38,6 @@ export class DocumentWebSocket {
         this.ws = new WebSocket(wsUrl)
 
         this.ws.onopen = () => {
-          console.log('WebSocket 连接已建立')
           this.connected.value = true
           this.reconnectAttempts = 0
           this.send({ type: 'subscribe' })
@@ -59,21 +58,19 @@ export class DocumentWebSocket {
           reject(error)
         }
 
-        this.ws.onclose = () => {
-          this.connected.value = false
-          console.log('WebSocket 连接已关闭')
-          
-          if (!this.isManualClose && this.reconnectAttempts < this.maxReconnectAttempts) {
-            this.reconnectAttempts++
-            const delay = this.reconnectDelay * this.reconnectAttempts
-            console.log(`${delay}ms 后尝试重连 (${this.reconnectAttempts}/${this.maxReconnectAttempts})`)
-            setTimeout(() => {
-              if (this.documentId) {
-                this.connect(this.documentId).catch(console.error)
+              this.ws.onclose = () => {
+                this.connected.value = false
+                
+                if (!this.isManualClose && this.reconnectAttempts < this.maxReconnectAttempts) {
+                  this.reconnectAttempts++
+                  const delay = this.reconnectDelay * this.reconnectAttempts
+                  setTimeout(() => {
+                    if (this.documentId) {
+                      this.connect(this.documentId).catch(console.error)
+                    }
+                  }, delay)
+                }
               }
-            }, delay)
-          }
-        }
       } catch (error) {
         reject(error)
       }
@@ -109,8 +106,6 @@ export class DocumentWebSocket {
     const handler = this.messageHandlers.get(message.type)
     if (handler) {
       handler(message.data)
-    } else {
-      console.log('未处理的消息类型:', message.type, message.data)
     }
   }
 

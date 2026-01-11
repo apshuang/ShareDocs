@@ -45,3 +45,64 @@ export function applyOperation(content: string, operation: {
   throw new Error(`不支持的操作类型: ${type}`)
 }
 
+
+export function adjustCursorPosition(
+  cursorPos: number,
+  operation: {
+    type: 'insert' | 'delete' | 'replace' | 'format'
+    from_pos: number
+    to_pos: number
+    content?: string
+  }
+): number {
+  const { type, from_pos, to_pos, content: opContent } = operation
+  
+  if (type === 'format') {
+    return cursorPos
+  }
+  
+  if (type === 'insert') {
+    if (from_pos > cursorPos) {
+      return cursorPos
+    }
+    const insertLength = opContent ? opContent.length : 0
+    return cursorPos + insertLength
+  }
+  
+  if (type === 'delete') {
+    if (from_pos >= cursorPos) {
+      return cursorPos
+    }
+    if (to_pos <= cursorPos) {
+      const deleteLength = to_pos - from_pos
+      return cursorPos - deleteLength
+    }
+    if (from_pos < cursorPos && cursorPos < to_pos) {
+      return from_pos
+    }
+    return cursorPos
+  }
+  
+  if (type === 'replace') {
+    const oldLength = to_pos - from_pos
+    const newLength = opContent ? opContent.length : 0
+    const diff = newLength - oldLength
+    
+    if (from_pos >= cursorPos) {
+      return cursorPos
+    }
+    
+    if (to_pos <= cursorPos) {
+      return cursorPos + diff
+    }
+    
+    if (from_pos < cursorPos && cursorPos < to_pos) {
+      return from_pos + newLength
+    }
+    
+    return cursorPos
+  }
+  
+  return cursorPos
+}
+

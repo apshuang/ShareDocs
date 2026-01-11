@@ -135,7 +135,7 @@ import { useAuthStore } from '@/stores/auth'
 import { documentAPI, authAPI } from '@/services/api'
 import { htmlToMarkdown, markdownToHtml } from '@/utils/markdown'
 import { DocumentWebSocket } from '@/services/websocket'
-import { applyOperation } from '@/utils/operation'
+import { applyOperation, adjustCursorPosition } from '@/utils/operation'
 
 const route = useRoute()
 const router = useRouter()
@@ -304,6 +304,21 @@ async function applyRemoteOperation(operation: any) {
 
   try {
     const currentMarkdown = lastMarkdown.value
+    const contentLength = currentMarkdown.length
+    
+    const selection = editor.value.state.selection
+    const cursorFrom = selection.from
+    
+    const textBeforeCursor = editor.value.state.doc.textBetween(0, cursorFrom, '\n', ' ')
+    const currentText = editor.value.state.doc.textContent
+    
+    let cursorPosInMarkdown = 0
+    if (textBeforeCursor.length > 0 && currentText.length > 0) {
+      const textRatio = textBeforeCursor.length / currentText.length
+      cursorPosInMarkdown = Math.floor(textRatio * contentLength)
+      cursorPosInMarkdown = Math.max(0, Math.min(cursorPosInMarkdown, contentLength))
+    }
+    
     const newMarkdown = applyOperation(currentMarkdown, {
       type: operation.type,
       from_pos: operation.from_pos,
@@ -311,40 +326,112 @@ async function applyRemoteOperation(operation: any) {
       content: operation.content
     })
 
-    const newHtml = markdownToHtml(newMarkdown)
+    const adjustedCursorPos = adjustCursorPosition(cursorPosInMarkdown, {
+      type: operation.type,
+      from_pos: operation.from_pos,
+      to_pos: operation.to_pos,
+      content: operation.content
+    })
     
-    const selection = editor.value.state.selection
-    const oldFrom = selection.from
-    const oldTo = selection.to
+    const finalCursorPos = Math.max(0, Math.min(adjustedCursorPos, newMarkdown.length))
+
+    const newHtml = markdownToHtml(newMarkdown)
     
     editor.value.commands.setContent(newHtml)
     lastMarkdown.value = newMarkdown
     currentVersion.value = operation.version
 
-    await new Promise(resolve => setTimeout(resolve, 10))
+    await new Promise(resolve => setTimeout(resolve, 50))
 
     if (editor.value) {
-      const doc = editor.value.state.doc
-      const newFrom = Math.min(oldFrom, doc.content.size)
-      const newTo = Math.min(oldTo, doc.content.size)
+      const newText = editor.value.state.doc.textContent
+      const newMarkdownLength = newMarkdown.length
+      const newDocSize = editor.value.state.doc.content.size
+      
+      const k = 50
+      const markdownStartPos = Math.max(0, finalCursorPos - k)
+      const markdownBeforeCursor = newMarkdown.substring(markdownStartPos, finalCursorPos)
+      
+      const normalizeForMatch = (text: string) => {
+        return text
+          .replace(/[#*_`\[\]()]/g, '')
+          .replace(/\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+      }
+      
+      const normalizedMarkdownBefore = normalizeForMatch(markdownBeforeCursor)
+      const normalizedNewText = normalizeForMatch(newText)
+      
+      let targetTextPos = 0
+      let matchFound = false
+      
+      if (normalizedMarkdownBefore.length > 0) {
+        const minMatchLength = Math.min(10, normalizedMarkdownBefore.length)
+        for (let len = normalizedMarkdownBefore.length; len >= minMatchLength; len--) {
+          const searchText = normalizedMarkdownBefore.slice(-len)
+          const pos = normalizedNewText.lastIndexOf(searchText)
+          
+          if (pos !== -1) {
+            targetTextPos = pos + len
+            matchFound = true
+            break
+          }
+        }
+      }
+      
+      if (!matchFound && newMarkdownLength > 0 && newText.length > 0) {
+        const textRatio = finalCursorPos / newMarkdownLength
+        targetTextPos = Math.floor(textRatio * newText.length)
+        targetTextPos = Math.max(0, Math.min(targetTextPos, newText.length))
+      }
+      
+      let foundPos = 1
+      let currentTextPos = 0
+      let found = false
+      
+      editor.value.state.doc.nodesBetween(0, newDocSize, (node, pos) => {
+        if (found || currentTextPos >= targetTextPos) {
+          return false
+        }
+        
+        if (node.isText) {
+          const nodeText = node.text || ''
+          const nodeLength = nodeText.length
+          
+          if (currentTextPos + nodeLength <= targetTextPos) {
+            currentTextPos += nodeLength
+            foundPos = pos + nodeLength
+          } else {
+            const offset = targetTextPos - currentTextPos
+            foundPos = pos + offset
+            currentTextPos = targetTextPos
+            found = true
+            return false
+          }
+        }
+      })
+      
+      if (!found && targetTextPos === 0) {
+        foundPos = 1
+      } else if (!found && targetTextPos >= newText.length) {
+        foundPos = newDocSize - 1
+      }
+      
+      const safePos = Math.max(1, Math.min(foundPos, newDocSize - 1))
       
       try {
         editor.value.commands.setTextSelection({
-          from: newFrom,
-          to: newTo
+          from: safePos,
+          to: safePos
         })
       } catch (error) {
-        const safeFrom = Math.max(1, Math.min(newFrom, doc.content.size))
-        const safeTo = Math.max(1, Math.min(newTo, doc.content.size))
-        editor.value.commands.setTextSelection({
-          from: safeFrom,
-          to: safeTo
-        })
+        console.warn('设置光标位置失败:', error)
       }
     }
 
   } catch (error) {
-    console.error('应用远程操作失败:', error)
+    console.error('[applyRemoteOperation] ❌ 应用远程操作失败:', error)
   } finally {
     isApplyingOperation.value = false
   }
@@ -395,7 +482,6 @@ onMounted(async () => {
         ws = new DocumentWebSocket()
         
         ws.on('connected', (data: any) => {
-          console.log('WebSocket 已连接:', data)
           if (data && data.current_version !== undefined) {
             currentVersion.value = data.current_version
           }
@@ -409,7 +495,6 @@ onMounted(async () => {
         })
 
         ws.on('subscribed', (data: any) => {
-          console.log('已订阅文档:', data)
           if (data && data.current_version !== undefined) {
             currentVersion.value = data.current_version
           }
