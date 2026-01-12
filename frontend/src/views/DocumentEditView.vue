@@ -202,7 +202,7 @@ const editor = useEditor({
       // 使用保存的版本号和 lastMarkdown，而不是当前的
       handleContentChange(debounceLastMarkdown, newMarkdown, debounceVersion)
       lastMarkdown.value = newMarkdown
-    }, 2000) // 防抖延迟：2000毫秒（2秒），方便多用户测试
+    }, 1000)
   },
 })
 
@@ -296,7 +296,7 @@ async function handleContentChange(oldMarkdown: string, newMarkdown: string, bas
   } catch (error: any) {
     console.error('发送操作失败:', error)
     if (error.response?.status === 409) {
-      alert('版本冲突，您编辑的内容已被删除')
+      alert('版本冲突，您编辑的内容已被修改')
       location.reload()
     } else {
       alert('发送操作失败: ' + (error.response?.data?.detail || error.message))

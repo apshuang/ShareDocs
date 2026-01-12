@@ -9,7 +9,7 @@ def ranges_overlap(range1: Tuple[int, int], range2: Tuple[int, int]) -> bool:
 
 def get_operation_range(operation: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     op_type = operation.get("type")
-    if op_type in ["delete", "replace"]:
+    if op_type in ["delete", "replace", "format"]:
         from_pos = operation.get("from_pos", 0)
         to_pos = operation.get("to_pos", 0)
         return (from_pos, to_pos)
