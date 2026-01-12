@@ -14,6 +14,10 @@ from app.schemas.share import DocumentShareCreate, DocumentShareResponse
 from app.utils.jwt import get_current_user
 from app.utils.operation import apply_operation
 from app.utils.permission import has_document_access, get_user_documents_query, get_user_permission
+from app.utils.conflict import (
+    check_operation_conflict,
+    transform_operation_for_conflict_resolution
+)
 from app.websocket.manager import manager
 from app.config import settings
 
@@ -314,23 +318,128 @@ async def apply_document_operation(
             detail="文档不存在"
         )
     
-    # 这里先使用一种很暴力的办法来判断（当前还是只支持单用户编辑的，在支持多用户时，这里就有相应的冲突解决措施）
-    if operation.base_version != document.current_version:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"版本冲突：操作基于版本 {operation.base_version}，但当前版本是 {document.current_version}"
-        )
+    operation_dict = operation.model_dump()
     
-    content = read_document_content(document.id)
-    
-    try:
-        operation_dict = operation.model_dump()
-        new_content = apply_operation(content, operation_dict)
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"操作应用失败: {str(e)}"
+    if operation.base_version == document.current_version:
+        content = read_document_content(document.id)
+        
+        if operation.type == "insert" and operation.from_pos > len(content):
+            operation_dict["from_pos"] = len(content)
+            operation_dict["to_pos"] = len(content)
+        
+        pending_operations = db.query(DocumentOperation).filter(
+            DocumentOperation.document_id == document_id,
+            DocumentOperation.sequence_number > operation.base_version
+        ).count()
+        
+        if pending_operations > 0:
+            history_operations = db.query(DocumentOperation).filter(
+                DocumentOperation.document_id == document_id,
+                DocumentOperation.sequence_number > operation.base_version,
+                DocumentOperation.sequence_number <= document.current_version
+            ).order_by(DocumentOperation.sequence_number).all()
+            
+            history_ops_list = [op.operation_data for op in history_operations]
+            
+            has_conflict, conflict_message = check_operation_conflict(
+                operation_dict,
+                history_ops_list
+            )
+            
+            if has_conflict:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=conflict_message
+                )
+        
+        try:
+            new_content = apply_operation(content, operation_dict)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"操作应用失败: {str(e)}"
+            )
+    else:
+        history_operations = db.query(DocumentOperation).filter(
+            DocumentOperation.document_id == document_id,
+            DocumentOperation.sequence_number > operation.base_version,
+            DocumentOperation.sequence_number <= document.current_version
+        ).order_by(DocumentOperation.sequence_number).all()
+        
+        history_ops_list = [op.operation_data for op in history_operations]
+        
+        base_operations = db.query(DocumentOperation).filter(
+            DocumentOperation.document_id == document_id,
+            DocumentOperation.sequence_number <= operation.base_version
+        ).order_by(DocumentOperation.sequence_number).all()
+        
+        base_content = ""
+        for base_op in base_operations:
+            try:
+                base_content = apply_operation(base_content, base_op.operation_data)
+            except ValueError as e:
+                base_content = read_document_content(document.id)
+                break
+        
+        has_conflict, conflict_message = check_operation_conflict(
+            operation_dict,
+            history_ops_list
         )
+        
+        if has_conflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=conflict_message
+            )
+        
+        # 根据历史操作调整当前操作的位置
+        # 先计算应用历史操作后的文档长度（用于检查插入操作是否超出范围）
+        temp_content = base_content
+        for hist_op in history_ops_list:
+            try:
+                temp_content = apply_operation(temp_content, hist_op)
+            except ValueError:
+                # 如果应用失败，使用base_content的长度
+                temp_content = base_content
+                break
+        
+        adjusted_content_length = len(temp_content)
+        
+        # 调整当前操作的位置（考虑历史操作的影响）
+        transformed_operation = transform_operation_for_conflict_resolution(
+            operation_dict,
+            history_ops_list,
+            adjusted_content_length
+        )
+        
+        # 对于插入操作，如果调整后位置仍然超出范围，调整到文档结尾
+        if transformed_operation.get("type") == "insert":
+            adjusted_from = transformed_operation.get("from_pos", 0)
+            if adjusted_from > adjusted_content_length:
+                transformed_operation["from_pos"] = adjusted_content_length
+                transformed_operation["to_pos"] = adjusted_content_length
+        
+        # 应用调整后的操作到 base_version 的内容
+        try:
+            new_content = apply_operation(base_content, transformed_operation)
+            # 更新 operation_dict 为调整后的操作
+            operation_dict = transformed_operation
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"操作应用失败: {str(e)}"
+            )
+        
+        # 应用历史操作到新内容
+        for hist_op in history_ops_list:
+            try:
+                new_content = apply_operation(new_content, hist_op)
+            except ValueError as e:
+                # 如果应用历史操作失败，说明有严重问题
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"应用历史操作失败: {str(e)}"
+                )
     
     version_before = document.current_version
     version_after = version_before + 1

@@ -161,6 +161,8 @@ const selectedPermission = ref<'read' | 'edit' | 'admin'>('edit')
 const shares = ref<Array<{ id: number; username: string; permission: string }>>([])
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let debounceVersion: number = 0 // 保存防抖时的版本号
+let debounceLastMarkdown: string = '' // 保存防抖时的 lastMarkdown
 let ws: DocumentWebSocket | null = null
 
 const editor = useEditor({
@@ -184,17 +186,23 @@ const editor = useEditor({
       clearTimeout(debounceTimer)
     }
     
+    // 保存当前版本号和 lastMarkdown，用于后续发送操作
+    // 这样即使防抖期间收到其他用户的操作，也能使用正确的基准版本
+    debounceVersion = currentVersion.value
+    debounceLastMarkdown = lastMarkdown.value
+    
     debounceTimer = setTimeout(() => {
       const html = editor.getHTML()
       const newMarkdown = htmlToMarkdown(html)
       
-      if (newMarkdown === lastMarkdown.value) {
+      if (newMarkdown === debounceLastMarkdown) {
         return
       }
       
-      handleContentChange(lastMarkdown.value, newMarkdown)
+      // 使用保存的版本号和 lastMarkdown，而不是当前的
+      handleContentChange(debounceLastMarkdown, newMarkdown, debounceVersion)
       lastMarkdown.value = newMarkdown
-    }, 300)
+    }, 2000) // 防抖延迟：2000毫秒（2秒），方便多用户测试
   },
 })
 
@@ -245,7 +253,7 @@ function calculateDiff(oldText: string, newText: string): Array<{ type: 'insert'
   return operations
 }
 
-async function handleContentChange(oldMarkdown: string, newMarkdown: string) {
+async function handleContentChange(oldMarkdown: string, newMarkdown: string, baseVersion?: number) {
   if (!documentId.value || isSendingOperation.value) {
     return
   }
@@ -257,13 +265,16 @@ async function handleContentChange(oldMarkdown: string, newMarkdown: string) {
   
   isSendingOperation.value = true
   
+  // 使用传入的版本号，如果没有传入则使用当前版本号
+  const versionToUse = baseVersion !== undefined ? baseVersion : currentVersion.value
+  
   try {
     for (const op of operations) {
       const operationData: any = {
         type: op.type === 'replace' ? 'replace' : op.type,
         from_pos: op.from_pos,
         to_pos: op.to_pos,
-        base_version: currentVersion.value
+        base_version: versionToUse
       }
       
       if (op.type === 'insert' || op.type === 'replace') {
@@ -285,7 +296,7 @@ async function handleContentChange(oldMarkdown: string, newMarkdown: string) {
   } catch (error: any) {
     console.error('发送操作失败:', error)
     if (error.response?.status === 409) {
-      alert('版本冲突，请刷新页面')
+      alert('版本冲突，您编辑的内容已被删除')
       location.reload()
     } else {
       alert('发送操作失败: ' + (error.response?.data?.detail || error.message))
